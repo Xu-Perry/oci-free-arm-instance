@@ -9,11 +9,16 @@ env:
   # 1. Suppress warnings to keep logs clean
   SUPPRESS_LABEL_WARNING: true
 
-  # 2. Mumbai Configuration (Verified)
+  # 2. San Jose Configuration (Verified)
   OCI_CLI_REGION: "us-sanjose-1"
   AD_NAME: "rLqN:US-SANJOSE-1-AD-1"
-  IMAGE_ID: "ocid1.image.oc1.us-sanjose-1.aaaaaaaavoalqgvm37waj5ehczi36mljok5mkv34n2a3ektkdt2wpup6hkwa"
   SUBNET_ID: "ocid1.subnet.oc1.us-sanjose-1.aaaaaaaadfbehebwrmbpogslur562n6isjdxfioaksaxs2sc3avfbwbf7brq"
+
+  # Image is resolved dynamically at runtime to the latest ARM-compatible
+  # Canonical Ubuntu 22.04 image for VM.Standard.A1.Flex. Override by
+  # setting an explicit IMAGE_ID here.
+  IMAGE_OS: "Canonical Ubuntu"
+  IMAGE_OS_VERSION: "22.04"
 
   # 3. Secrets
   COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
@@ -54,20 +59,73 @@ jobs:
           printf '%s\n' "$OCI_CLI_KEY_CONTENT" > /home/runner/.oci/oci_api_key.pem
           chmod 600 /home/runner/.oci/oci_api_key.pem
 
+          # Sanitize single-line secrets:
+          #   - take only the first non-empty line
+          #   - strip CR and surrounding whitespace
+          # This protects against secrets that were pasted with trailing
+          # newlines, CRLF endings, or (accidentally) multi-line content.
+          clean() {
+            printf '%s' "$1" | tr -d '\r' | awk 'NF{print; exit}' | sed -E 's/^[[:space:]]+|[[:space:]]+$//g'
+          }
+          OCI_CLI_USER_CLEAN=$(clean "$OCI_CLI_USER")
+          OCI_CLI_TENANCY_CLEAN=$(clean "$OCI_CLI_TENANCY")
+          OCI_CLI_FINGERPRINT_CLEAN=$(clean "$OCI_CLI_FINGERPRINT")
+          OCI_CLI_REGION_CLEAN=$(clean "$OCI_CLI_REGION")
+
+          # Fail fast with a clear message if any secret looks wrong.
+          if [[ ! "$OCI_CLI_USER_CLEAN" =~ ^ocid1\.user\. ]]; then
+            echo "❌ secrets.OCI_CLI_USER must be a single OCID starting with 'ocid1.user.' — got something else (possibly multi-line)."
+            exit 1
+          fi
+          if [[ ! "$OCI_CLI_TENANCY_CLEAN" =~ ^ocid1\.tenancy\. ]]; then
+            echo "❌ secrets.OCI_CLI_TENANCY must be a single OCID starting with 'ocid1.tenancy.'."
+            exit 1
+          fi
+          if [[ ! "$OCI_CLI_FINGERPRINT_CLEAN" =~ ^([0-9a-f]{2}:){15}[0-9a-f]{2}$ ]]; then
+            echo "❌ secrets.OCI_CLI_FINGERPRINT must be a 16-byte colon-separated hex fingerprint."
+            exit 1
+          fi
+
           # Write Config File (Absolute Paths)
           {
             echo "[DEFAULT]"
-            echo "user=$OCI_CLI_USER"
-            echo "tenancy=$OCI_CLI_TENANCY"
-            echo "fingerprint=$OCI_CLI_FINGERPRINT"
+            echo "user=$OCI_CLI_USER_CLEAN"
+            echo "tenancy=$OCI_CLI_TENANCY_CLEAN"
+            echo "fingerprint=$OCI_CLI_FINGERPRINT_CLEAN"
             echo "key_file=/home/runner/.oci/oci_api_key.pem"
-            echo "region=$OCI_CLI_REGION"
+            echo "region=$OCI_CLI_REGION_CLEAN"
           } > /home/runner/.oci/config
+
+          # Show config structure (keys only, values masked) for debugging.
+          echo "--- /home/runner/.oci/config (keys only) ---"
+          awk -F= 'NF{print $1"=***"}' /home/runner/.oci/config
+          echo "--- end ---"
 
           # Write SSH Key (use env var to safely handle any content)
           printf '%s\n' "$SSH_PUBLIC_KEY" > /home/runner/my_ssh_key.pub
 
-          # Launch VM (50GB Boot Volume to avoid Quota Limits)
+          # Resolve the latest ARM-compatible image for the chosen OS,
+          # unless IMAGE_ID is explicitly provided.
+          if [[ -z "${IMAGE_ID:-}" ]]; then
+            echo "Resolving latest $IMAGE_OS $IMAGE_OS_VERSION image for VM.Standard.A1.Flex..."
+            IMAGE_ID=$(oci compute image list \
+              --compartment-id "$COMPARTMENT_ID" \
+              --operating-system "$IMAGE_OS" \
+              --operating-system-version "$IMAGE_OS_VERSION" \
+              --shape "VM.Standard.A1.Flex" \
+              --sort-by TIMECREATED \
+              --sort-order DESC \
+              --limit 1 \
+              --query 'data[0].id' \
+              --raw-output)
+            if [[ -z "$IMAGE_ID" || "$IMAGE_ID" == "null" ]]; then
+              echo "❌ Could not find an ARM image for $IMAGE_OS $IMAGE_OS_VERSION in $OCI_CLI_REGION."
+              exit 1
+            fi
+            echo "Using image: $IMAGE_ID"
+          fi
+
+          # Launch VM
           OCI_OUTPUT=$(oci compute instance launch \
             --compartment-id "$COMPARTMENT_ID" \
             --availability-domain "$AD_NAME" \
@@ -78,7 +136,7 @@ jobs:
             --ssh-authorized-keys-file "/home/runner/my_ssh_key.pub" \
             --assign-public-ip true \
             --display-name "coolify-vm" \
-            --boot-volume-size-in-gbs 50 2>&1 || true)
+            --boot-volume-size-in-gbs 200 2>&1 || true)
 
           # Store Log for Discord
           echo "log_data<<EOF" >> $GITHUB_OUTPUT
