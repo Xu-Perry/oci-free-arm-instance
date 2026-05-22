@@ -38,7 +38,9 @@ jobs:
 
       - name: Setup OCI CLI and Try to Create VM
         id: create_vm
-        continue-on-error: true 
+        continue-on-error: true
+        env:
+          SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
         run: |
           set -o pipefail
 
@@ -48,20 +50,22 @@ jobs:
           # Create Directory
           mkdir -p /home/runner/.oci
 
-          # Write Key File
-          echo "${{ secrets.OCI_CLI_KEY_CONTENT }}" > /home/runner/.oci/oci_api_key.pem
+          # Write Key File (use env var to safely handle multi-line PEM)
+          printf '%s\n' "$OCI_CLI_KEY_CONTENT" > /home/runner/.oci/oci_api_key.pem
           chmod 600 /home/runner/.oci/oci_api_key.pem
 
           # Write Config File (Absolute Paths)
-          echo "[DEFAULT]" > /home/runner/.oci/config
-          echo "user=${{ secrets.OCI_CLI_USER }}" >> /home/runner/.oci/config
-          echo "tenancy=${{ secrets.OCI_CLI_TENANCY }}" >> /home/runner/.oci/config
-          echo "fingerprint=${{ secrets.OCI_CLI_FINGERPRINT }}" >> /home/runner/.oci/config
-          echo "key_file=/home/runner/.oci/oci_api_key.pem" >> /home/runner/.oci/config
-          echo "region=${{ env.OCI_CLI_REGION }}" >> /home/runner/.oci/config
-          
-          # Write SSH Key
-          echo "${{ secrets.SSH_PUBLIC_KEY }}" > /home/runner/my_ssh_key.pub
+          {
+            echo "[DEFAULT]"
+            echo "user=$OCI_CLI_USER"
+            echo "tenancy=$OCI_CLI_TENANCY"
+            echo "fingerprint=$OCI_CLI_FINGERPRINT"
+            echo "key_file=/home/runner/.oci/oci_api_key.pem"
+            echo "region=$OCI_CLI_REGION"
+          } > /home/runner/.oci/config
+
+          # Write SSH Key (use env var to safely handle any content)
+          printf '%s\n' "$SSH_PUBLIC_KEY" > /home/runner/my_ssh_key.pub
 
           # Launch VM (50GB Boot Volume to avoid Quota Limits)
           OCI_OUTPUT=$(oci compute instance launch \
