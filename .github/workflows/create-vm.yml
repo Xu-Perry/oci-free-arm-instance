@@ -1,8 +1,9 @@
 name: Try to Create OCI VM
-# Runs every 2 minutes (GitHub may delay scheduled runs during peak load)
+# Runs every 5 minutes. Note: GitHub Actions cron has a minimum effective
+# interval of ~5 min and may be delayed/skipped during peak load.
 on:
   schedule:
-    - cron: "*/2 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 env:
